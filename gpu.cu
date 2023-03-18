@@ -70,14 +70,12 @@ __global__ void move_gpu(particle_t* d_parts, int num_parts, double size) {
 
 
 
-int nbinsx;
-__device__ int* d_nbinsx;  // number of bins in one dimension (total number of bins = nbinsx^2)
+static int nbinsx;
 static particle_t* parts;
 static int *part_ids, *d_part_ids;
-static unsigned int *bin_starts, *d_bin_starts;
-static unsigned int *bin_idx, *d_bin_idx; // used as counter when populating bins
+static int *bin_starts, *d_bin_starts;
+static int *bin_idx, *d_bin_idx; // used as counter when populating bins
 static double dxbin; // length&width of each bin
-__device__ double d_dxbin;
 
 
 void init_simulation(particle_t* d_parts, int num_parts, double size) {
@@ -88,114 +86,80 @@ void init_simulation(particle_t* d_parts, int num_parts, double size) {
     
     nbinsx = ((int)((double) size / (cutoff)) + 1);  // bin size greater or equal to cutoff length
     
-    cudaMalloc((void**)&d_nbinsx, sizeof(int));
-    cudaMemcpyToSymbol("d_nbinsx", &nbinsx, sizeof(int), sizeof(int),cudaMemcpyHostToDevice);
-
     
-    //part_ids = new int[num_parts];
+    
+    part_ids = new int[num_parts];
     cudaMalloc((void**)&d_part_ids, num_parts * sizeof(int));
-    bin_starts = new unsigned int[nbinsx*nbinsx](); 
-    cudaMalloc((void**)&d_bin_starts, (nbinsx*nbinsx) * sizeof(unsigned int));
+    bin_starts = new int[nbinsx*nbinsx](); 
+    cudaMalloc((void**)&d_bin_starts, (nbinsx*nbinsx) * sizeof(int));
     //bin_idx = new int[nbinsx*nbinsx]; 
-    cudaMalloc((void**)&d_bin_idx, (nbinsx*nbinsx) * sizeof(unsigned int));
+    cudaMalloc((void**)&d_bin_idx, (nbinsx*nbinsx) * sizeof(int));
     
     parts = new particle_t[num_parts];
     cudaMemcpy(parts, d_parts, num_parts * sizeof(particle_t), cudaMemcpyDeviceToHost);
         
     dxbin = size / (double) nbinsx;    
-    cudaMemcpy(&d_dxbin, &dxbin, sizeof(double), cudaMemcpyHostToDevice);
-    
+
     blks = (num_parts + NUM_THREADS - 1) / NUM_THREADS;
 }
 
 
 
 
-__global__ void count_parts_gpu(particle_t* d_parts, int num_parts, unsigned int* d_bin_starts) {
+__global__ void count_parts_gpu(particle_t* d_parts, int num_parts, int* d_bin_starts, int nbinsx, double dxbin) {
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
-    ////if (tid >= num_parts)
-    ////    return;
-    ////
-    ////particle_t* p = &d_parts[tid];
-    ////int ib = (int)(p->x / d_dxbin);
-    ////int jb = (int)(p->y / d_dxbin);
-    ////atomicInc(d_bin_starts+(*d_nbinsx)*ib+jb,d_bin_starts[(*d_nbinsx)*ib+jb]);
-    //
-    if (tid >= (*d_nbinsx))
-        return;    
-    
-    d_bin_starts[tid]=1;
+    if (tid >= num_parts)
+        return;
+    int ib = (int)(d_parts[tid].x / (dxbin));
+    int jb = (int)(d_parts[tid].y / (dxbin));
+    atomicAdd(d_bin_starts+(nbinsx)*ib+jb,1);    
 }
 
 
 
 
 
-__global__ void emplace_parts_gpu(particle_t* d_parts, int num_parts, unsigned int* d_bin_idx, int* d_part_ids) {
+__global__ void emplace_parts_gpu(particle_t* d_parts, int num_parts, int* d_bin_idx, int* d_part_ids, int nbinsx, double dxbin) {
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
     if (tid >= num_parts)
         return;
-    int ib = (int)(d_parts[tid].x / d_dxbin);
-    int jb = (int)(d_parts[tid].y / d_dxbin);
-    int idx = atomicInc(d_bin_idx+(*d_nbinsx)*ib+jb,d_bin_idx[(*d_nbinsx)*ib+jb]);
+    int ib = (int)(d_parts[tid].x / dxbin);
+    int jb = (int)(d_parts[tid].y / dxbin);
+    int idx = atomicAdd(d_bin_idx+nbinsx*ib+jb,1);
     d_part_ids[idx] = tid;
 }
 
 
 void calc_bins(particle_t* d_parts, int num_parts){
-    std::cout << "here-" << nbinsx*nbinsx << std::endl;
     /// Reset counter to 0 ///
     cudaMemset(d_bin_starts, 0, nbinsx*nbinsx*sizeof(int));
-    // for (int b = 1; b < nbinsx*nbinsx+1; ++b) {
-    //     bin_starts[b] =0;
-    // }
     
     /// Count number of d_parts per bin ///
-    //cudaMemcpy(d_bin_starts, bin_starts, (nbinsx*nbinsx+1) * sizeof(unsigned int), cudaMemcpyHostToDevice);
-    count_parts_gpu<<<blks, NUM_THREADS>>>(d_parts, num_parts, d_bin_starts);
-    std::cout << "here2" << std::endl;
-    cudaMemcpy(bin_starts, d_bin_starts, (nbinsx*nbinsx) * sizeof(unsigned int), cudaMemcpyDeviceToHost);
-
-    for (int b = 0; b < nbinsx*nbinsx; ++b) {
-        std::cout << bin_starts[b];
-    }
-    std::cout << "\n";
+    count_parts_gpu<<<blks, NUM_THREADS>>>(d_parts, num_parts, d_bin_starts, nbinsx, dxbin);
     
-    //for (int i = 0; i < num_parts; ++i) {
-    //    int ib = (int)(parts[i].x / dxbin);
-    //    int jb = (int)(parts[i].y / dxbin);
-    //    bin_starts[1+nbinsx*ib+jb]++;
+    //cudaMemcpy(bin_starts, d_bin_starts, (nbinsx*nbinsx) * sizeof(int), cudaMemcpyDeviceToHost);
+    //for (int b = 0; b < nbinsx*nbinsx; ++b) {
+    //    std::cout << bin_starts[b];
     //}
+    //std::cout << "\n";
     
     
     /// Prefix sum the counts ///
-    thrust::exclusive_scan(d_bin_starts,d_bin_starts+nbinsx*nbinsx,d_bin_starts);
-    // for (int b = 1; b < nbinsx*nbinsx; ++b) {
-    //     bin_starts[b+1] += bin_starts[b];
-    // }
-    std::cout << "here3" << std::endl;
-    
-    /////////////////////////////////////////////////////////////////////////////
-    //if (bin_starts[nbinsx*nbinsx] != num_parts){
-    //    std::cout << "shit -- binstarts[-1] = " << bin_starts[nbinsx*nbinsx] << "num_parts = " << num_parts << std::endl;
-    //}
-    /////////////////////////////////////////////////////////////////////////////
+    thrust::exclusive_scan(thrust::device,d_bin_starts,d_bin_starts+nbinsx*nbinsx,d_bin_starts);
     
     /// Copy bin_starts into bin_idx ///
-    cudaMemcpy(d_bin_idx, d_bin_starts, (nbinsx*nbinsx) * sizeof(unsigned int), cudaMemcpyDeviceToDevice);
-    // for (int b = 0; b < nbinsx*nbinsx; ++b) {
-    //     bin_idx[b] = bin_starts[b];
-    // }    
-    std::cout << "here4" << std::endl;
+    cudaMemcpy(d_bin_idx, d_bin_starts, (nbinsx*nbinsx) * sizeof(int), cudaMemcpyDeviceToDevice);
+
     /// emplace parts ///  
-    emplace_parts_gpu<<<blks, NUM_THREADS>>>(d_parts, num_parts, d_bin_idx,d_part_ids);
+    emplace_parts_gpu<<<blks, NUM_THREADS>>>(d_parts, num_parts, d_bin_idx,d_part_ids, nbinsx, dxbin);
+    
+    //cudaMemcpy(part_ids, d_part_ids, (num_parts) * sizeof(int), cudaMemcpyDeviceToHost);
     //for (int i = 0; i < num_parts; ++i) {
-    //    int ib = (int)(parts[i].x / dxbin);
-    //    int jb = (int)(parts[i].y / dxbin);
-    //    *(part_ids + bin_idx[nbinsx*ib+jb]) = i;
-    //    bin_idx[nbinsx*ib+jb] ++;
-    //}    
-    std::cout << "here5" << std::endl;
+    //    std::cout << part_ids[i] << "-";
+    //}
+    //std::cout << "\n";
+    
+  
 }
 
 void simulate_one_step(particle_t* d_parts, int num_parts, double size) {
